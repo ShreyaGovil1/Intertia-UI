@@ -1,0 +1,129 @@
+/* Intertia Specific Styles */
+
+.intertia-gradient {
+  background: linear-gradient(135deg, #CCF381 0%, #7000FF 100%);
+}
+
+.intertia-bg {
+  background-color: #09090B;
+}
+
+.card-glass {
+  background: rgba(24, 24, 27, 0.5);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  border: 1px solid rgba(255, 255, 255, 0.05);
+  border-radius: 1rem;
+}
+
+.hud-glass {
+  background: rgba(0, 0, 0, 0.6);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+/* Map territory polygon styles */
+.territory-polygon {
+  fill-opacity: 0.4;
+  stroke-width: 2;
+}
+
+.territory-own {
+  fill: #CCF381;
+  stroke: #CCF381;
+}
+
+.territory-other {
+  fill: #7000FF;
+  stroke: #7000FF;
+}
+
+.territory-decay {
+  fill: #FF003C;
+  stroke: #FF003C;
+  fill-opacity: 0.2;
+}
+
+/* Run trail animation */
+.run-trail {
+  stroke: #CCF381;
+  stroke-width: 4;
+  stroke-linecap: round;
+  stroke-dasharray: 10, 5;
+  animation: dash 1s linear infinite;
+}
+
+@keyframes dash {
+  to {
+    stroke-dashoffset: -15;
+  }
+}
+
+/* Stats counter animation */
+.stat-value {
+  font-family: 'JetBrains Mono', monospace;
+  font-variant-numeric: tabular-nums;
+}
+
+/* Badge styles */
+.badge-earned {
+  filter: drop-shadow(0 0 8px hsl(var(--primary)));
+}
+
+.badge-locked {
+  filter: grayscale(100%) opacity(0.4);
+}
+
+/* Leaderboard rank styles */
+.rank-gold {
+  color: #FFD700;
+  text-shadow: 0 0 10px rgba(255, 215, 0, 0.5);
+}
+
+.rank-silver {
+  color: #C0C0C0;
+  text-shadow: 0 0 10px rgba(192, 192, 192, 0.5);
+}
+
+.rank-bronze {
+  color: #CD7F32;
+  text-shadow: 0 0 10px rgba(205, 127, 50, 0.5);
+}
+
+/* Button hover effects */
+.btn-primary:hover {
+  box-shadow: 0 0 20px rgba(204, 243, 129, 0.4);
+}
+
+.btn-secondary:hover {
+  background: rgba(255, 255, 255, 0.1);
+}
+
+/* Page transitions */
+.page-enter {
+  opacity: 0;
+  transform: translateY(20px);
+}
+
+.page-enter-active {
+  opacity: 1;
+  transform: translateY(0);
+  transition: opacity 300ms ease-out, transform 300ms ease-out;
+}
+
+/* Loading skeleton */
+.skeleton {
+  background: linear-gradient(90deg, #18181B 0%, #27272A 50%, #18181B 100%);
+  background-size: 200% 100%;
+  animation: skeleton-loading 1.5s ease-in-out infinite;
+}
+
+@keyframes skeleton-loading {
+  0% {
+    background-position: 200% 0;
+  }
+  100% {
+    background-position: -200% 0;
+  }
+}
