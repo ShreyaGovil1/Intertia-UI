@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">Inertia</string>
+    <string name="title_activity_main">Inertia</string>
+    <string name="package_name">com.intertia.app</string>
+    <string name="custom_url_scheme">com.intertia.app</string>
+</resources>
