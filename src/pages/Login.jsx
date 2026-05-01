@@ -36,9 +36,7 @@ export default function Login() {
   };
 
   const handleGoogleLogin = () => {
-    // REMINDER: DO NOT HARDCODE THE URL, OR ADD ANY FALLBACKS OR REDIRECT URLS, THIS BREAKS THE AUTH
-    const redirectUrl = window.location.origin + '/dashboard';
-    window.location.href = `https://auth.emergentagent.com/?redirect=${encodeURIComponent(redirectUrl)}`;
+    toast.info('Google login is not configured yet. Please use email/password to log in.');
   };
 
   return (

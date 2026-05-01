@@ -95,25 +95,6 @@ export const useAuthStore = create(
           return { success: false, error: e.message };
         }
       },
-
-      processOAuthSession: async (sessionId) => {
-        try {
-          const response = await fetch(`${API_URL}/auth/session`, {
-            headers: { 'X-Session-ID': sessionId },
-            credentials: 'include',
-          });
-          
-          if (!response.ok) {
-            throw new Error('OAuth session invalid');
-          }
-          
-          const user = await response.json();
-          set({ user, isAuthenticated: true, isLoading: false });
-          return { success: true, user };
-        } catch (e) {
-          return { success: false, error: e.message };
-        }
-      },
     }),
     {
       name: 'auth-storage',
