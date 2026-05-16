@@ -127,3 +127,56 @@
     background-position: -200% 0;
   }
 }
+
+/* ═══ Glassmorphic Panel ═══ */
+.glass-panel {
+  background: rgba(9, 9, 11, 0.65);
+  backdrop-filter: blur(20px);
+  -webkit-backdrop-filter: blur(20px);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+/* ═══ H3 Hex Territory Styles ═══ */
+.hex-territory {
+  transition: fill-opacity 0.3s ease, stroke-width 0.3s ease;
+  filter: drop-shadow(0 0 4px rgba(255, 255, 255, 0.1));
+}
+
+.hex-territory:hover {
+  fill-opacity: 0.7 !important;
+  stroke-width: 3 !important;
+  stroke-dasharray: 6, 3;
+  filter: drop-shadow(0 0 10px rgba(204, 243, 129, 0.4));
+}
+
+/* Gold flash for live territory capture events */
+@keyframes hex-gold-flash {
+  0%, 100% { fill-opacity: 0.5; stroke-width: 2; }
+  50% { fill-opacity: 0.9; stroke-width: 4; }
+}
+
+.hex-flash {
+  animation: hex-gold-flash 0.8s ease-in-out 3;
+  filter: drop-shadow(0 0 12px rgba(255, 215, 0, 0.6));
+}
+
+/* ═══ Leaflet Tooltip Override ═══ */
+.hex-tooltip {
+  background: rgba(9, 9, 11, 0.85) !important;
+  backdrop-filter: blur(12px) !important;
+  border: 1px solid rgba(255, 255, 255, 0.12) !important;
+  border-radius: 8px !important;
+  color: #f4f4f5 !important;
+  padding: 6px 10px !important;
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.4) !important;
+}
+
+.hex-tooltip::before {
+  border-top-color: rgba(9, 9, 11, 0.85) !important;
+}
+
+/* ═══ Map Container Override ═══ */
+.leaflet-container {
+  background: #f5f0e8 !important; /* warm neutral for light tiles */
+}
+

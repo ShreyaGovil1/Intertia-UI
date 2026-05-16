@@ -1,33 +1,74 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { motion } from 'framer-motion';
+import { MapContainer, TileLayer, Polygon, Tooltip, useMap } from 'react-leaflet';
+import L from 'leaflet';
+import 'leaflet/dist/leaflet.css';
 import {
-  Target,
-  Play,
-  Map,
-  Trophy,
-  Flame,
-  Users,
-  Calendar,
-  ChevronRight,
-  LogOut,
-  Settings,
-  TrendingUp,
+  Target, Play, Map, Trophy, Flame, Users, Calendar,
+  ChevronRight, LogOut, Settings, TrendingUp, Crosshair, Hexagon,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { useAuthStore } from '@/store/authStore';
 import { Avatar, AvatarImage, AvatarFallback } from '@/components/ui/avatar';
 import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuSeparator,
-  DropdownMenuTrigger,
+  DropdownMenu, DropdownMenuContent, DropdownMenuItem,
+  DropdownMenuSeparator, DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu';
-
-import { API_BASE } from '@/env';
+import { toast } from 'sonner';
+import { API_BASE, BACKEND_URL } from '@/env';
 
 const API_URL = API_BASE;
+
+/* ── Deterministic pastel color from username ── */
+function getColorForUser(name, currentUserId, ownerId) {
+  if (ownerId === currentUserId) return 'hsl(75, 84%, 69%)'; // lime (#CCF381)
+  let hash = 0;
+  for (let i = 0; i < name.length; i++) {
+    hash = name.charCodeAt(i) + ((hash << 5) - hash);
+  }
+  const hue = Math.abs(hash) % 360;
+  return `hsl(${hue}, 55%, 65%)`;
+}
+
+/* ── Convert H3 boundary (array of [lat,lon]) to Leaflet positions ── */
+function hexBoundaryToPositions(boundary) {
+  return boundary.map(([lat, lon]) => [lat, lon]);
+}
+
+/* ── Cinematic fly-in on mount ── */
+const CinematicEntry = ({ target }) => {
+  const map = useMap();
+  const flown = useRef(false);
+  useEffect(() => {
+    if (target && !flown.current) {
+      flown.current = true;
+      map.setView([target[0] + 2, target[1]], 5, { animate: false });
+      setTimeout(() => {
+        map.flyTo(target, 15, { duration: 2.5, easeLinearity: 0.25 });
+      }, 400);
+    }
+  }, [target, map]);
+  return null;
+};
+
+/* ── Recenter control (must be inside MapContainer) ── */
+const RecenterControl = ({ position }) => {
+  const map = useMap();
+  return (
+    <div className="leaflet-top leaflet-right" style={{ top: '12px', right: '12px' }}>
+      <div className="leaflet-control">
+        <button
+          onClick={() => position && map.flyTo(position, 15, { duration: 1 })}
+          className="glass-panel p-3 rounded-full hover:bg-white/10 transition-colors"
+          data-testid="recenter-btn"
+        >
+          <Crosshair className="w-5 h-5 text-[#CCF381]" />
+        </button>
+      </div>
+    </div>
+  );
+};
 
 export default function Dashboard() {
   const navigate = useNavigate();
@@ -37,61 +78,103 @@ export default function Dashboard() {
   const [leaderboard, setLeaderboard] = useState([]);
   const [currentSeason, setCurrentSeason] = useState(null);
   const [isLoading, setIsLoading] = useState(true);
+  const [hexagons, setHexagons] = useState([]);
+  const [userPosition, setUserPosition] = useState(null);
+  const [highlightedHexes, setHighlightedHexes] = useState(new Set());
+  const wsRef = useRef(null);
+  const wsRetries = useRef(0);
 
   useEffect(() => {
+    // Get user GPS for map centering
+    if (navigator.geolocation) {
+      navigator.geolocation.getCurrentPosition(
+        (pos) => setUserPosition([pos.coords.latitude, pos.coords.longitude]),
+        (err) => {
+          console.warn('Geolocation error, using IP-based fallback:', err.message);
+          // Don't set a hardcoded fallback — leave null so map shows a generic view
+        },
+        { enableHighAccuracy: true, timeout: 8000 }
+      );
+    }
     fetchDashboardData();
+    return () => { if (wsRef.current) wsRef.current.close(); };
   }, []);
+
+  // Fetch hexagons when position known
+  useEffect(() => {
+    if (!userPosition) return;
+    fetchHexagons();
+    connectLiveWS();
+  }, [userPosition]);
 
   const fetchDashboardData = async () => {
     setIsLoading(true);
     try {
       const headers = token ? { Authorization: `Bearer ${token}` } : {};
-
+      const opts = { headers, credentials: 'include' };
       const [statsRes, runsRes, leaderRes, seasonRes] = await Promise.all([
-        fetch(`${API_URL}/users/${user?.user_id}/stats`, { headers, credentials: 'include' }),
-        fetch(`${API_URL}/runs?limit=5`, { headers, credentials: 'include' }),
-        fetch(`${API_URL}/leaderboards/area?limit=5`, { headers, credentials: 'include' }),
-        fetch(`${API_URL}/seasons/current`, { headers, credentials: 'include' }),
+        fetch(`${API_URL}/users/${user?.user_id}/stats`, opts),
+        fetch(`${API_URL}/runs?limit=5`, opts),
+        fetch(`${API_URL}/leaderboards/area?limit=5`, opts),
+        fetch(`${API_URL}/seasons/current`, opts),
       ]);
-
       if (statsRes.ok) setStats(await statsRes.json());
       if (runsRes.ok) setRecentRuns(await runsRes.json());
       if (leaderRes.ok) setLeaderboard(await leaderRes.json());
       if (seasonRes.ok) setCurrentSeason(await seasonRes.json());
-    } catch (e) {
-      console.error('Dashboard fetch error:', e);
-    }
+    } catch (e) { console.error('Dashboard fetch error:', e); }
     setIsLoading(false);
   };
 
-  const handleLogout = async () => {
-    await logout();
-    navigate('/');
+  const fetchHexagons = async () => {
+    if (!userPosition) return;
+    try {
+      const [lat, lon] = userPosition;
+      const res = await fetch(
+        `${API_URL}/hexagons?min_lat=${lat - 0.1}&max_lat=${lat + 0.1}&min_lon=${lon - 0.1}&max_lon=${lon + 0.1}`
+      );
+      if (res.ok) setHexagons(await res.json());
+    } catch (e) { console.error('Hex fetch error:', e); }
   };
 
-  const formatDistance = (meters) => {
-    if (!meters) return '0 m';
-    if (meters >= 1000) return `${(meters / 1000).toFixed(1)} km`;
-    return `${Math.round(meters)} m`;
+  const connectLiveWS = () => {
+    try {
+      const wsUrl = BACKEND_URL.replace(/^http/, 'ws').replace(/\/$/, '') + '/api/ws/dashboard';
+      const ws = new WebSocket(wsUrl);
+      wsRef.current = ws;
+      ws.onopen = () => { ws.send(JSON.stringify({ type: 'ping' })); };
+      ws.onmessage = (evt) => {
+        const data = JSON.parse(evt.data);
+        if (data.type === 'territory_claimed') {
+          toast(`🏴 ${data.user_name} claimed ${data.hex_count} hexagons!`, { duration: 4000 });
+          // Highlight the new hexes with gold flash
+          const newIds = new Set((data.hexes || []).map(h => h.h3_index));
+          setHighlightedHexes(newIds);
+          setTimeout(() => setHighlightedHexes(new Set()), 4000);
+          // Refresh hex data
+          fetchHexagons();
+        }
+      };
+      ws.onclose = () => {
+        wsRetries.current += 1;
+        if (wsRetries.current <= 3) {
+          setTimeout(connectLiveWS, 5000 * wsRetries.current);
+        }
+      };
+      ws.onerror = () => {}; // Suppress console noise
+    } catch (e) { /* WS not available */ }
   };
 
-  const formatArea = (sqMeters) => {
-    if (!sqMeters) return '0 m²';
-    if (sqMeters >= 10000) return `${(sqMeters / 10000).toFixed(2)} ha`;
-    if (sqMeters >= 1000000) return `${(sqMeters / 1000000).toFixed(2)} km²`;
-    return `${Math.round(sqMeters)} m²`;
-  };
+  const handleLogout = async () => { await logout(); navigate('/'); };
 
-  const formatDate = (dateStr) => {
-    if (!dateStr) return '';
-    const date = new Date(dateStr);
-    return date.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
-  };
+  const formatDistance = (m) => !m ? '0 m' : m >= 1000 ? `${(m / 1000).toFixed(1)} km` : `${Math.round(m)} m`;
+  const formatArea = (s) => !s ? '0 m²' : s >= 1000000 ? `${(s / 1000000).toFixed(2)} km²` : s >= 10000 ? `${(s / 10000).toFixed(2)} ha` : `${Math.round(s)} m²`;
+  const formatDate = (d) => d ? new Date(d).toLocaleDateString('en-US', { month: 'short', day: 'numeric' }) : '';
 
   return (
     <div className="min-h-screen bg-[#09090B]">
       {/* Navigation */}
-      <nav className="fixed top-0 left-0 right-0 z-50 glass">
+      <nav className="fixed top-0 left-0 right-0 z-[100] glass-panel border-b border-white/5">
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
           <div className="flex items-center justify-between h-16">
             <Link to="/dashboard" className="flex items-center gap-2" data-testid="logo-link">
@@ -100,80 +183,36 @@ export default function Dashboard() {
               </div>
               <span className="font-unbounded font-bold text-xl text-white">Intertia</span>
             </Link>
-
             <div className="hidden md:flex items-center gap-6">
-              <Link
-                to="/dashboard"
-                className="text-white font-medium hover:text-[#CCF381] transition-colors"
-                data-testid="nav-dashboard"
-              >
-                Dashboard
-              </Link>
-              <Link
-                to="/leaderboards"
-                className="text-zinc-400 hover:text-white transition-colors"
-                data-testid="nav-leaderboards"
-              >
-                Leaderboards
-              </Link>
-              <Link
-                to="/groups"
-                className="text-zinc-400 hover:text-white transition-colors"
-                data-testid="nav-groups"
-              >
-                Groups
-              </Link>
-              <Link
-                to="/seasons"
-                className="text-zinc-400 hover:text-white transition-colors"
-                data-testid="nav-seasons"
-              >
-                Seasons
-              </Link>
+              <Link to="/dashboard" className="text-white font-medium hover:text-[#CCF381] transition-colors">Dashboard</Link>
+              <Link to="/leaderboards" className="text-zinc-400 hover:text-white transition-colors">Leaderboards</Link>
+              <Link to="/groups" className="text-zinc-400 hover:text-white transition-colors">Groups</Link>
+              <Link to="/seasons" className="text-zinc-400 hover:text-white transition-colors">Seasons</Link>
             </div>
-
             <div className="flex items-center gap-4">
-              <Button
-                onClick={() => navigate('/run')}
-                className="bg-[#CCF381] text-black hover:bg-[#B8E065] font-bold rounded-full px-6"
-                data-testid="start-run-btn"
-              >
-                <Play className="w-4 h-4 mr-2" />
-                Start Run
+              <Button onClick={() => navigate('/run')} className="bg-[#CCF381] text-black hover:bg-[#B8E065] font-bold rounded-full px-6" data-testid="start-run-btn">
+                <Play className="w-4 h-4 mr-2" /> Start Run
               </Button>
-
               <DropdownMenu>
                 <DropdownMenuTrigger asChild>
                   <button className="flex items-center gap-2" data-testid="user-menu-trigger">
                     <Avatar className="w-9 h-9 border-2 border-white/10">
                       <AvatarImage src={user?.picture} />
-                      <AvatarFallback className="bg-zinc-800 text-white">
-                        {user?.name?.charAt(0) || 'U'}
-                      </AvatarFallback>
+                      <AvatarFallback className="bg-zinc-800 text-white">{user?.name?.charAt(0) || 'U'}</AvatarFallback>
                     </Avatar>
                   </button>
                 </DropdownMenuTrigger>
-                <DropdownMenuContent align="end" className="w-56 bg-zinc-900 border-white/10">
+                <DropdownMenuContent align="end" className="w-56 bg-zinc-900 border-white/10 z-[9999]">
                   <div className="px-3 py-2">
                     <p className="text-sm font-medium text-white">{user?.name}</p>
                     <p className="text-xs text-zinc-500">{user?.email}</p>
                   </div>
                   <DropdownMenuSeparator className="bg-white/10" />
-                  <DropdownMenuItem
-                    onClick={() => navigate('/profile')}
-                    className="text-zinc-300 focus:bg-white/10 focus:text-white cursor-pointer"
-                    data-testid="menu-profile"
-                  >
-                    <Settings className="w-4 h-4 mr-2" />
-                    Profile
+                  <DropdownMenuItem onClick={() => navigate('/profile')} className="text-zinc-300 focus:bg-white/10 focus:text-white cursor-pointer">
+                    <Settings className="w-4 h-4 mr-2" /> Profile
                   </DropdownMenuItem>
-                  <DropdownMenuItem
-                    onClick={handleLogout}
-                    className="text-red-400 focus:bg-red-500/10 focus:text-red-400 cursor-pointer"
-                    data-testid="menu-logout"
-                  >
-                    <LogOut className="w-4 h-4 mr-2" />
-                    Log out
+                  <DropdownMenuItem onClick={handleLogout} className="text-red-400 focus:bg-red-500/10 focus:text-red-400 cursor-pointer">
+                    <LogOut className="w-4 h-4 mr-2" /> Log out
                   </DropdownMenuItem>
                 </DropdownMenuContent>
               </DropdownMenu>
@@ -183,123 +222,114 @@ export default function Dashboard() {
       </nav>
 
       {/* Main Content */}
-      <main className="pt-24 pb-12 px-4 sm:px-6 lg:px-8">
-        <div className="max-w-7xl mx-auto">
-          {/* Welcome Section */}
-          <motion.div
-            initial={{ opacity: 0, y: 20 }}
-            animate={{ opacity: 1, y: 0 }}
-            className="mb-8"
+      <main className="pt-20 pb-12">
+        {/* ═══ TERRITORY MAP ═══ */}
+        <div className="relative w-full h-[55vh] overflow-hidden" style={{ zIndex: 0 }}>
+          <MapContainer
+            center={userPosition || [28.6139, 77.209]}
+            zoom={5}
+            className="h-full w-full"
+            zoomControl={false}
+            attributionControl={false}
+            preferCanvas={true}
           >
-            <h1 className="font-unbounded text-2xl sm:text-3xl font-bold text-white mb-2">
-              Welcome back, {user?.name?.split(' ')[0] || 'Runner'}!
-            </h1>
-            <p className="text-zinc-400">Ready to claim more territory today?</p>
-          </motion.div>
+            {/* Clean, minimal base tiles */}
+            <TileLayer url="https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png" />
+            <CinematicEntry target={userPosition} />
 
-          {/* Stats Grid */}
-          <div className="grid grid-cols-2 lg:grid-cols-4 gap-4 mb-8">
-            <motion.div
-              initial={{ opacity: 0, y: 20 }}
-              animate={{ opacity: 1, y: 0 }}
-              transition={{ delay: 0.1 }}
-              className="card-glass p-5"
-              data-testid="stat-distance"
-            >
-              <div className="flex items-center justify-between mb-3">
-                <TrendingUp className="w-5 h-5 text-[#CCF381]" />
-                <span className="text-xs text-zinc-500">Total Distance</span>
-              </div>
-              <p className="font-unbounded text-2xl font-bold text-white">
-                {formatDistance(stats?.total_distance_m || user?.total_distance_m)}
-              </p>
-            </motion.div>
+            {/* H3 Hexagon territories */}
+            {hexagons.map((hex) => {
+              const positions = hexBoundaryToPositions(hex.boundary || []);
+              if (positions.length < 3) return null;
+              const color = getColorForUser(hex.owner_name || '', user?.user_id, hex.owner_id);
+              const isHighlighted = highlightedHexes.has(hex.h3_index);
+              return (
+                <Polygon
+                  key={hex.h3_index}
+                  positions={positions}
+                  pathOptions={{
+                    fillColor: isHighlighted ? '#FFD700' : color,
+                    fillOpacity: isHighlighted ? 0.7 : 0.45,
+                    color: isHighlighted ? '#FFD700' : color,
+                    weight: isHighlighted ? 3 : 1.5,
+                    className: isHighlighted ? 'hex-flash' : 'hex-territory',
+                  }}
+                >
+                  <Tooltip sticky className="hex-tooltip">
+                    <div className="text-xs">
+                      <strong>{hex.owner_name}</strong>
+                      <br />{Math.round(hex.area_m2)} m²
+                    </div>
+                  </Tooltip>
+                </Polygon>
+              );
+            })}
 
-            <motion.div
-              initial={{ opacity: 0, y: 20 }}
-              animate={{ opacity: 1, y: 0 }}
-              transition={{ delay: 0.15 }}
-              className="card-glass p-5"
-              data-testid="stat-area"
-            >
-              <div className="flex items-center justify-between mb-3">
-                <Map className="w-5 h-5 text-[#7000FF]" />
-                <span className="text-xs text-zinc-500">Territory</span>
+            {/* Recenter button — must be inside MapContainer */}
+            <RecenterControl position={userPosition} />
+          </MapContainer>
+
+          {/* Glassmorphic floating overlays on the map */}
+          <div className="absolute top-4 left-4 z-[40]">
+            <div className="glass-panel rounded-2xl p-4 min-w-[200px]">
+              <div className="flex items-center gap-2 mb-2">
+                <Hexagon className="w-5 h-5 text-[#CCF381]" />
+                <span className="text-sm font-semibold text-white">Your Territory</span>
               </div>
-              <p className="font-unbounded text-2xl font-bold text-white">
+              <p className="font-unbounded text-2xl font-bold text-[#CCF381]">
                 {formatArea(stats?.total_area_m2 || user?.total_area_m2)}
               </p>
-            </motion.div>
-
-            <motion.div
-              initial={{ opacity: 0, y: 20 }}
-              animate={{ opacity: 1, y: 0 }}
-              transition={{ delay: 0.2 }}
-              className="card-glass p-5"
-              data-testid="stat-runs"
-            >
-              <div className="flex items-center justify-between mb-3">
-                <Trophy className="w-5 h-5 text-yellow-500" />
-                <span className="text-xs text-zinc-500">Total Runs</span>
-              </div>
-              <p className="font-unbounded text-2xl font-bold text-white">
-                {stats?.total_runs || user?.total_runs || 0}
+              <p className="text-xs text-zinc-400 mt-1">
+                Rank #{stats?.global_rank || '—'}
               </p>
-            </motion.div>
+            </div>
+          </div>
 
-            <motion.div
-              initial={{ opacity: 0, y: 20 }}
-              animate={{ opacity: 1, y: 0 }}
-              transition={{ delay: 0.25 }}
-              className="card-glass p-5"
-              data-testid="stat-streak"
-            >
-              <div className="flex items-center justify-between mb-3">
-                <Flame className="w-5 h-5 text-orange-500" />
-                <span className="text-xs text-zinc-500">Streak</span>
-              </div>
-              <p className="font-unbounded text-2xl font-bold text-white">
-                {stats?.current_streak || user?.current_streak || 0} days
-              </p>
-            </motion.div>
+
+
+          {/* Gradient fade at bottom of map */}
+          <div className="absolute bottom-0 left-0 right-0 h-20 bg-gradient-to-t from-[#09090B] to-transparent pointer-events-none z-[30]" />
+        </div>
+
+        {/* ═══ STATS & CONTENT ═══ */}
+        <div className="px-4 sm:px-6 lg:px-8 max-w-7xl mx-auto -mt-8 relative z-[10]">
+          {/* Stats Grid */}
+          <div className="grid grid-cols-2 lg:grid-cols-4 gap-4 mb-8">
+            {[
+              { icon: TrendingUp, color: 'text-[#CCF381]', label: 'Total Distance', value: formatDistance(stats?.total_distance_m || user?.total_distance_m) },
+              { icon: Hexagon, color: 'text-[#7000FF]', label: 'Territory', value: formatArea(stats?.total_area_m2 || user?.total_area_m2) },
+              { icon: Trophy, color: 'text-yellow-500', label: 'Total Runs', value: stats?.total_runs || user?.total_runs || 0 },
+              { icon: Flame, color: 'text-orange-500', label: 'Streak', value: `${stats?.current_streak || user?.current_streak || 0} days` },
+            ].map((stat, i) => (
+              <motion.div key={i} initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.1 + i * 0.05 }} className="card-glass p-5">
+                <div className="flex items-center justify-between mb-3">
+                  <stat.icon className={`w-5 h-5 ${stat.color}`} />
+                  <span className="text-xs text-zinc-500">{stat.label}</span>
+                </div>
+                <p className="font-unbounded text-2xl font-bold text-white">{stat.value}</p>
+              </motion.div>
+            ))}
           </div>
 
           {/* Main Grid */}
           <div className="grid lg:grid-cols-3 gap-6">
             {/* Recent Runs */}
-            <motion.div
-              initial={{ opacity: 0, y: 20 }}
-              animate={{ opacity: 1, y: 0 }}
-              transition={{ delay: 0.3 }}
-              className="lg:col-span-2 card-glass p-6"
-              data-testid="recent-runs-section"
-            >
+            <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.3 }} className="lg:col-span-2 card-glass p-6">
               <div className="flex items-center justify-between mb-6">
                 <h2 className="font-unbounded font-semibold text-lg text-white">Recent Runs</h2>
-                <Link to="/profile" className="text-[#CCF381] text-sm hover:underline">
-                  View all
-                </Link>
+                <Link to="/profile" className="text-[#CCF381] text-sm hover:underline">View all</Link>
               </div>
-
               {recentRuns.length > 0 ? (
                 <div className="space-y-4">
                   {recentRuns.map((run, index) => (
-                    <div
-                      key={run.run_id}
-                      className="flex items-center justify-between p-4 rounded-xl bg-zinc-900/50 hover:bg-zinc-800/50 transition-colors"
-                      data-testid={`run-item-${index}`}
-                    >
+                    <div key={run.run_id} className="flex items-center justify-between p-4 rounded-xl bg-zinc-900/50 hover:bg-zinc-800/50 transition-colors">
                       <div className="flex items-center gap-4">
                         <div className="w-10 h-10 rounded-full bg-[#CCF381]/10 flex items-center justify-center">
                           <Map className="w-5 h-5 text-[#CCF381]" />
                         </div>
                         <div>
-                          <p className="font-medium text-white">
-                            {formatDate(run.started_at)}
-                          </p>
-                          <p className="text-sm text-zinc-500">
-                            {run.run_type === 'group' ? 'Group Run' : 'Solo Run'}
-                          </p>
+                          <p className="font-medium text-white">{formatDate(run.started_at)}</p>
+                          <p className="text-sm text-zinc-500">{run.run_type === 'group' ? 'Group Run' : 'Solo Run'}</p>
                         </div>
                       </div>
                       <div className="text-right">
@@ -313,13 +343,7 @@ export default function Dashboard() {
                 <div className="text-center py-12">
                   <Map className="w-12 h-12 text-zinc-700 mx-auto mb-4" />
                   <p className="text-zinc-500 mb-4">No runs yet. Start your first territory conquest!</p>
-                  <Button
-                    onClick={() => navigate('/run')}
-                    className="bg-[#CCF381] text-black hover:bg-[#B8E065] font-semibold rounded-full"
-                    data-testid="first-run-btn"
-                  >
-                    Start First Run
-                  </Button>
+                  <Button onClick={() => navigate('/run')} className="bg-[#CCF381] text-black hover:bg-[#B8E065] font-semibold rounded-full">Start First Run</Button>
                 </div>
               )}
             </motion.div>
@@ -327,45 +351,20 @@ export default function Dashboard() {
             {/* Right Sidebar */}
             <div className="space-y-6">
               {/* Leaderboard Preview */}
-              <motion.div
-                initial={{ opacity: 0, y: 20 }}
-                animate={{ opacity: 1, y: 0 }}
-                transition={{ delay: 0.35 }}
-                className="card-glass p-6"
-                data-testid="leaderboard-preview"
-              >
+              <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.35 }} className="card-glass p-6">
                 <div className="flex items-center justify-between mb-6">
                   <h2 className="font-unbounded font-semibold text-white">Top Runners</h2>
-                  <Link to="/leaderboards" className="text-[#CCF381] text-sm hover:underline">
-                    View all
-                  </Link>
+                  <Link to="/leaderboards" className="text-[#CCF381] text-sm hover:underline">View all</Link>
                 </div>
-
                 <div className="space-y-3">
                   {leaderboard.slice(0, 5).map((entry, index) => (
-                    <div
-                      key={entry.user_id}
-                      className="flex items-center gap-3"
-                      data-testid={`leaderboard-entry-${index}`}
-                    >
-                      <span
-                        className={`w-6 text-center font-mono font-bold ${
-                          index === 0
-                            ? 'rank-gold'
-                            : index === 1
-                            ? 'rank-silver'
-                            : index === 2
-                            ? 'rank-bronze'
-                            : 'text-zinc-500'
-                        }`}
-                      >
+                    <div key={entry.user_id} className="flex items-center gap-3">
+                      <span className={`w-6 text-center font-mono font-bold ${index === 0 ? 'rank-gold' : index === 1 ? 'rank-silver' : index === 2 ? 'rank-bronze' : 'text-zinc-500'}`}>
                         {entry.rank}
                       </span>
                       <Avatar className="w-8 h-8">
                         <AvatarImage src={entry.picture} />
-                        <AvatarFallback className="bg-zinc-800 text-white text-xs">
-                          {entry.name?.charAt(0)}
-                        </AvatarFallback>
+                        <AvatarFallback className="bg-zinc-800 text-white text-xs">{entry.name?.charAt(0)}</AvatarFallback>
                       </Avatar>
                       <div className="flex-1 min-w-0">
                         <p className="text-sm font-medium text-white truncate">{entry.name}</p>
@@ -376,15 +375,9 @@ export default function Dashboard() {
                 </div>
               </motion.div>
 
-              {/* Current Season */}
+              {/* Season & Quick Actions */}
               {currentSeason && (
-                <motion.div
-                  initial={{ opacity: 0, y: 20 }}
-                  animate={{ opacity: 1, y: 0 }}
-                  transition={{ delay: 0.4 }}
-                  className="card-glass p-6 relative overflow-hidden"
-                  data-testid="season-preview"
-                >
+                <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.4 }} className="card-glass p-6 relative overflow-hidden">
                   <div className="absolute top-0 right-0 w-32 h-32 bg-[#7000FF] rounded-full filter blur-[60px] opacity-20" />
                   <div className="relative">
                     <div className="flex items-center gap-2 mb-3">
@@ -394,46 +387,25 @@ export default function Dashboard() {
                     <h3 className="font-unbounded font-semibold text-white mb-2">{currentSeason.name}</h3>
                     <p className="text-sm text-zinc-400 mb-4">{currentSeason.description}</p>
                     <Link to="/seasons">
-                      <Button
-                        variant="outline"
-                        className="w-full border-white/20 bg-transparent text-white hover:bg-white/10 rounded-xl"
-                        data-testid="view-season-btn"
-                      >
-                        View Season
-                        <ChevronRight className="w-4 h-4 ml-2" />
+                      <Button variant="outline" className="w-full border-white/20 bg-transparent text-white hover:bg-white/10 rounded-xl">
+                        View Season <ChevronRight className="w-4 h-4 ml-2" />
                       </Button>
                     </Link>
                   </div>
                 </motion.div>
               )}
 
-              {/* Quick Actions */}
-              <motion.div
-                initial={{ opacity: 0, y: 20 }}
-                animate={{ opacity: 1, y: 0 }}
-                transition={{ delay: 0.45 }}
-                className="card-glass p-6"
-              >
+              <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.45 }} className="card-glass p-6">
                 <h2 className="font-unbounded font-semibold text-white mb-4">Quick Actions</h2>
                 <div className="space-y-3">
                   <Link to="/groups">
-                    <Button
-                      variant="outline"
-                      className="w-full justify-start border-white/10 bg-transparent text-zinc-300 hover:bg-white/5 hover:text-white rounded-xl"
-                      data-testid="quick-groups-btn"
-                    >
-                      <Users className="w-4 h-4 mr-3 text-[#CCF381]" />
-                      Join Group Run
+                    <Button variant="outline" className="w-full justify-start border-white/10 bg-transparent text-zinc-300 hover:bg-white/5 hover:text-white rounded-xl">
+                      <Users className="w-4 h-4 mr-3 text-[#CCF381]" /> Join Group Run
                     </Button>
                   </Link>
                   <Link to="/profile">
-                    <Button
-                      variant="outline"
-                      className="w-full justify-start border-white/10 bg-transparent text-zinc-300 hover:bg-white/5 hover:text-white rounded-xl"
-                      data-testid="quick-badges-btn"
-                    >
-                      <Trophy className="w-4 h-4 mr-3 text-yellow-500" />
-                      View Badges
+                    <Button variant="outline" className="w-full justify-start border-white/10 bg-transparent text-zinc-300 hover:bg-white/5 hover:text-white rounded-xl mt-3">
+                      <Trophy className="w-4 h-4 mr-3 text-yellow-500" /> View Badges
                     </Button>
                   </Link>
                 </div>

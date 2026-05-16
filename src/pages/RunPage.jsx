@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { motion, AnimatePresence } from 'framer-motion';
-import { MapContainer, TileLayer, Polyline, Polygon, useMap } from 'react-leaflet';
+import { MapContainer, TileLayer, Polyline, Polygon, Circle, useMap } from 'react-leaflet';
 import L from 'leaflet';
 import 'leaflet/dist/leaflet.css';
 import {
@@ -15,6 +15,7 @@ import {
   TrendingUp,
   Map,
   AlertCircle,
+  Hexagon,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { useAuthStore } from '@/store/authStore';
@@ -54,9 +55,11 @@ export default function RunPage() {
     startRun,
     addPoint,
     syncPoints,
-    closeLoop,
+    claimHexes,
     endRun,
-    setDuration,
+    updateDuration,
+    pause,
+    resume,
     reset,
   } = useRunStore();
 
@@ -66,7 +69,7 @@ export default function RunPage() {
   const [gpsError, setGpsError] = useState(null);
   const [claims, setClaims] = useState([]);
   const [showClaimAnimation, setShowClaimAnimation] = useState(false);
-  const [lastClaimArea, setLastClaimArea] = useState(0);
+  const [lastClaimInfo, setLastClaimInfo] = useState({ count: 0, area: 0 });
 
   const watchIdRef = useRef(null);
   const timerRef = useRef(null);
@@ -85,7 +88,7 @@ export default function RunPage() {
           console.error('Geolocation error:', error);
           setGpsError('Unable to get your location. Please enable GPS.');
         },
-        { enableHighAccuracy: true }
+        { enableHighAccuracy: true, timeout: 10000 }
       );
     } else {
       setGpsError('Geolocation is not supported by your browser.');
@@ -96,7 +99,7 @@ export default function RunPage() {
         navigator.geolocation.clearWatch(watchIdRef.current);
       }
       if (timerRef.current) {
-        clearInterval(timerRef.current);
+        cancelAnimationFrame(timerRef.current);
       }
       if (syncIntervalRef.current) {
         clearInterval(syncIntervalRef.current);
@@ -138,12 +141,12 @@ export default function RunPage() {
 
     toast.success('Run started! Start moving to capture territory.');
 
-    // Start GPS tracking
+    // Start GPS tracking with high accuracy
     watchIdRef.current = navigator.geolocation.watchPosition(
       (position) => {
         if (isPaused) return;
 
-        const { latitude, longitude, accuracy, speed: gpsSpeed } = position.coords;
+        const { latitude, longitude, accuracy, speed: gpsSpeed, heading } = position.coords;
         setUserPosition([latitude, longitude]);
         setMapCenter([latitude, longitude]);
 
@@ -153,8 +156,10 @@ export default function RunPage() {
           lon: longitude,
           accuracy_m: accuracy,
           speed_mps: gpsSpeed || 0,
+          heading: heading || null,
         };
 
+        // addPoint already does strict accuracy filtering internally
         addPoint(point);
       },
       (error) => {
@@ -163,15 +168,17 @@ export default function RunPage() {
       },
       {
         enableHighAccuracy: true,
-        maximumAge: 1000,
-        timeout: 5000,
+        maximumAge: 2000,
+        timeout: 10000,
       }
     );
 
-    // Start duration timer
-    timerRef.current = setInterval(() => {
-      setDuration((prev) => prev + 1);
-    }, 1000);
+    // Start monotonic duration timer using requestAnimationFrame
+    const tick = () => {
+      updateDuration();
+      timerRef.current = requestAnimationFrame(tick);
+    };
+    timerRef.current = requestAnimationFrame(tick);
 
     // Start sync interval (every 5 seconds)
     syncIntervalRef.current = setInterval(() => {
@@ -180,20 +187,26 @@ export default function RunPage() {
   };
 
   const handlePause = () => {
-    setIsPaused(!isPaused);
     if (!isPaused) {
+      pause();
+      setIsPaused(true);
       toast.info('Run paused');
     } else {
+      resume();
+      setIsPaused(false);
       toast.info('Run resumed');
     }
   };
 
-  const handleCloseLoop = async () => {
-    const claim = await closeLoop(token);
-    if (claim) {
-      setLastClaimArea(claim.area_m2);
+  const handleClaimHexes = async () => {
+    // First sync all pending points
+    await syncPoints(token);
+
+    const result = await claimHexes(token);
+    if (result) {
+      setLastClaimInfo({ count: result.claimed_count, area: result.total_area_m2 });
       setShowClaimAnimation(true);
-      toast.success(`Territory claimed! ${claim.area_m2.toFixed(0)} m²`);
+      toast.success(result.message);
       setTimeout(() => setShowClaimAnimation(false), 3000);
 
       // Refresh claims
@@ -207,7 +220,7 @@ export default function RunPage() {
         }
       }
     } else {
-      toast.error('No valid loop detected. Keep running!');
+      toast.error('Not enough GPS data to claim territory. Keep running!');
     }
   };
 
@@ -218,7 +231,7 @@ export default function RunPage() {
       watchIdRef.current = null;
     }
     if (timerRef.current) {
-      clearInterval(timerRef.current);
+      cancelAnimationFrame(timerRef.current);
       timerRef.current = null;
     }
     if (syncIntervalRef.current) {
@@ -229,10 +242,13 @@ export default function RunPage() {
     // Sync final points
     await syncPoints(token);
 
+    // Auto-claim hexes on run end
+    await claimHexes(token);
+
     // End run
     const finalRun = await endRun(token);
     if (finalRun) {
-      toast.success('Run completed!');
+      toast.success('Run completed! Territory claimed.');
       navigate('/dashboard');
     } else {
       toast.error('Failed to end run');
@@ -311,6 +327,20 @@ export default function RunPage() {
             }}
           />
         )}
+
+        {/* User position indicator */}
+        {userPosition && (
+          <Circle
+            center={userPosition}
+            radius={8}
+            pathOptions={{
+              color: '#CCF381',
+              fillColor: '#CCF381',
+              fillOpacity: 1,
+              weight: 3,
+            }}
+          />
+        )}
       </MapContainer>
 
       {/* Header */}
@@ -368,14 +398,14 @@ export default function RunPage() {
                 transition={{ type: 'spring', stiffness: 200 }}
                 className="w-24 h-24 rounded-full bg-[#CCF381] flex items-center justify-center mb-4 mx-auto neon-glow"
               >
-                <Target className="w-12 h-12 text-black" />
+                <Hexagon className="w-12 h-12 text-black" />
               </motion.div>
               <motion.p
                 initial={{ opacity: 0, y: 20 }}
                 animate={{ opacity: 1, y: 0 }}
                 className="font-unbounded text-3xl font-bold text-white neon-text"
               >
-                +{lastClaimArea.toFixed(0)} m²
+                +{lastClaimInfo.count} hexes
               </motion.p>
               <motion.p
                 initial={{ opacity: 0 }}
@@ -383,7 +413,7 @@ export default function RunPage() {
                 transition={{ delay: 0.2 }}
                 className="text-[#CCF381] text-lg"
               >
-                Territory Claimed!
+                {lastClaimInfo.area.toFixed(0)} m² Territory Claimed!
               </motion.p>
             </div>
           </motion.div>
@@ -432,7 +462,7 @@ export default function RunPage() {
 
               <div className="text-center" data-testid="hud-area">
                 <div className="flex items-center justify-center gap-1 mb-1">
-                  <Map className="w-4 h-4 text-[#7000FF]" />
+                  <Hexagon className="w-4 h-4 text-[#7000FF]" />
                 </div>
                 <p className="font-mono text-2xl font-bold text-[#7000FF]">
                   {areaClaimed.toFixed(0)}
@@ -470,11 +500,11 @@ export default function RunPage() {
               </Button>
 
               <Button
-                onClick={handleCloseLoop}
+                onClick={handleClaimHexes}
                 className="w-16 h-16 rounded-full bg-[#7000FF] hover:bg-[#5E00D6] text-white p-0 transition-all duration-300"
                 data-testid="claim-territory-btn"
               >
-                <Target className="w-8 h-8" />
+                <Hexagon className="w-8 h-8" />
               </Button>
 
               <Button
@@ -506,7 +536,7 @@ export default function RunPage() {
             animate={{ opacity: 1 }}
             className="text-center text-zinc-500 text-sm mt-4"
           >
-            Run a loop and tap the target to claim territory
+            Run around to claim hexagonal territory tiles!
           </motion.p>
         )}
       </div>

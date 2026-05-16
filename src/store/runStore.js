@@ -3,6 +3,11 @@ import { API_BASE } from '@/env';
 
 const API_URL = API_BASE;
 
+// Strict GPS accuracy threshold in meters - points worse than this are discarded
+const MAX_ACCURACY_M = 15;
+// Minimum movement in meters to count a new point (filters GPS jitter when stationary)
+const MIN_MOVEMENT_M = 2;
+
 export const useRunStore = create((set, get) => ({
   currentRun: null,
   isRunning: false,
@@ -11,6 +16,9 @@ export const useRunStore = create((set, get) => ({
   areaClaimed: 0,
   duration: 0,
   speed: 0,
+  startTime: null,     // Absolute timestamp when run started (for monotonic time)
+  pausedTime: 0,       // Accumulated paused seconds
+  pauseStartTime: null, // When the current pause began
   wsConnection: null,
 
   startRun: async (token, runType = 'solo', groupId = null) => {
@@ -36,6 +44,9 @@ export const useRunStore = create((set, get) => ({
         areaClaimed: 0,
         duration: 0,
         speed: 0,
+        startTime: Date.now(),
+        pausedTime: 0,
+        pauseStartTime: null,
       });
 
       return run;
@@ -47,16 +58,29 @@ export const useRunStore = create((set, get) => ({
 
   addPoint: (point) => {
     const { points, distance } = get();
+
+    // Strict accuracy filter: discard low-quality GPS readings
+    if (point.accuracy_m > MAX_ACCURACY_M) {
+      return;
+    }
+
     let newDistance = distance;
 
     if (points.length > 0) {
       const lastPoint = points[points.length - 1];
-      newDistance += haversineDistance(
+      const segDist = haversineDistance(
         lastPoint.lat,
         lastPoint.lon,
         point.lat,
         point.lon
       );
+
+      // Filter GPS jitter: ignore micro-movements when stationary
+      if (segDist < MIN_MOVEMENT_M) {
+        return;
+      }
+
+      newDistance += segDist;
     }
 
     set({
@@ -64,6 +88,40 @@ export const useRunStore = create((set, get) => ({
       distance: newDistance,
       speed: point.speed_mps || 0,
     });
+  },
+
+  // Called every animation frame to compute monotonic elapsed time
+  updateDuration: () => {
+    const { startTime, pausedTime, pauseStartTime } = get();
+    if (!startTime) return;
+
+    const now = Date.now();
+    let elapsed = Math.floor((now - startTime) / 1000);
+
+    // Subtract total paused time
+    elapsed -= pausedTime;
+
+    // If currently paused, also subtract the ongoing pause
+    if (pauseStartTime) {
+      elapsed -= Math.floor((now - pauseStartTime) / 1000);
+    }
+
+    set({ duration: Math.max(0, elapsed) });
+  },
+
+  pause: () => {
+    set({ pauseStartTime: Date.now() });
+  },
+
+  resume: () => {
+    const { pauseStartTime, pausedTime } = get();
+    if (pauseStartTime) {
+      const pauseDuration = Math.floor((Date.now() - pauseStartTime) / 1000);
+      set({
+        pausedTime: pausedTime + pauseDuration,
+        pauseStartTime: null,
+      });
+    }
   },
 
   syncPoints: async (token) => {
@@ -85,16 +143,39 @@ export const useRunStore = create((set, get) => ({
       });
 
       if (response.ok) {
-        const result = await response.json();
-        set((state) => ({
-          distance: state.distance + (result.distance_added || 0),
-        }));
+        // Server recalculates distance, we trust our local calculation
+        await response.json();
       }
     } catch (e) {
       console.error('Sync points error:', e);
     }
   },
 
+  claimHexes: async (token) => {
+    const { currentRun } = get();
+    if (!currentRun) return null;
+
+    try {
+      const response = await fetch(`${API_URL}/runs/${currentRun.run_id}/claim-hexes`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${token}` },
+        credentials: 'include',
+      });
+
+      if (response.ok) {
+        const result = await response.json();
+        set((state) => ({
+          areaClaimed: state.areaClaimed + result.total_area_m2,
+        }));
+        return result;
+      }
+    } catch (e) {
+      console.error('Claim hexes error:', e);
+    }
+    return null;
+  },
+
+  // Legacy close-loop (kept for backward compat)
   closeLoop: async (token) => {
     const { currentRun } = get();
     if (!currentRun) return null;
@@ -135,6 +216,9 @@ export const useRunStore = create((set, get) => ({
         set({
           currentRun: run,
           isRunning: false,
+          startTime: null,
+          pausedTime: 0,
+          pauseStartTime: null,
         });
         return run;
       }
@@ -155,6 +239,9 @@ export const useRunStore = create((set, get) => ({
       areaClaimed: 0,
       duration: 0,
       speed: 0,
+      startTime: null,
+      pausedTime: 0,
+      pauseStartTime: null,
     }),
 }));
 
