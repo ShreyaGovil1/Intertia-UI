@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { motion } from 'framer-motion';
-import { MapContainer, TileLayer, Polygon, Tooltip, useMap } from 'react-leaflet';
+import { MapContainer, TileLayer, Polygon, Tooltip, useMap, CircleMarker } from 'react-leaflet';
 import L from 'leaflet';
 import 'leaflet/dist/leaflet.css';
 import {
@@ -275,6 +275,20 @@ export default function Dashboard() {
 
             {/* Recenter button — must be inside MapContainer */}
             <RecenterControl position={userPosition} />
+
+            {/* Live user location marker */}
+            {userPosition && (
+              <CircleMarker
+                center={userPosition}
+                radius={8}
+                pathOptions={{
+                  fillColor: '#ef4444', // Red dot
+                  fillOpacity: 1,
+                  color: '#ffffff', // White border
+                  weight: 2,
+                }}
+              />
+            )}
           </MapContainer>
 
           {/* Glassmorphic floating overlays on the map */}

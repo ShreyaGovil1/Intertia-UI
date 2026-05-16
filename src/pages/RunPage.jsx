@@ -213,7 +213,7 @@ export default function RunPage() {
       if (userPosition) {
         const [lat, lon] = userPosition;
         const response = await fetch(
-          `${API_BASE}/claims?min_lat=${lat - 0.05}&max_lat=${lat + 0.05}&min_lon=${lon - 0.05}&max_lon=${lon + 0.05}`
+          `${API_BASE}/hexagons?min_lat=${lat - 0.05}&max_lat=${lat + 0.05}&min_lon=${lon - 0.05}&max_lon=${lon + 0.05}`
         );
         if (response.ok) {
           setClaims(await response.json());
