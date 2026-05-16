@@ -107,24 +107,24 @@ export default function RunPage() {
     };
   }, []);
 
-  // Load nearby claims
+  // Load nearby hexagons
   useEffect(() => {
-    const fetchClaims = async () => {
+    const fetchHexagons = async () => {
       if (!userPosition) return;
       try {
         const [lat, lon] = userPosition;
         const response = await fetch(
-          `${API_BASE}/claims?min_lat=${lat - 0.05}&max_lat=${lat + 0.05}&min_lon=${lon - 0.05}&max_lon=${lon + 0.05}`
+          `${API_BASE}/hexagons?min_lat=${lat - 0.1}&max_lat=${lat + 0.1}&min_lon=${lon - 0.1}&max_lon=${lon + 0.1}`
         );
         if (response.ok) {
           const data = await response.json();
-          setClaims(data);
+          setClaims(data); // keeping the state name `claims` to minimize changes, but they are hexagons
         }
       } catch (e) {
-        console.error('Error fetching claims:', e);
+        console.error('Error fetching hexagons:', e);
       }
     };
-    fetchClaims();
+    fetchHexagons();
   }, [userPosition]);
 
   const handleStartRun = async () => {
@@ -297,14 +297,15 @@ export default function RunPage() {
         />
         <MapUpdater center={mapCenter} />
 
-        {/* Existing claims */}
-        {claims.map((claim) => {
-          const coords = claim.geometry?.coordinates?.[0]?.map((c) => [c[1], c[0]]) || [];
-          const isOwn = claim.owner_id === user?.user_id;
+        {/* Existing hexagons */}
+        {claims.map((hex) => {
+          const positions = hex.boundary ? hex.boundary.map(([lat, lon]) => [lat, lon]) : [];
+          if (positions.length < 3) return null;
+          const isOwn = hex.owner_id === user?.user_id;
           return (
             <Polygon
-              key={claim.claim_id}
-              positions={coords}
+              key={hex.h3_index}
+              positions={positions}
               pathOptions={{
                 fillColor: isOwn ? '#CCF381' : '#7000FF',
                 fillOpacity: 0.3,

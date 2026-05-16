@@ -87,17 +87,25 @@ export default function Dashboard() {
   useEffect(() => {
     // Get user GPS for map centering
     if (navigator.geolocation) {
-      navigator.geolocation.getCurrentPosition(
-        (pos) => setUserPosition([pos.coords.latitude, pos.coords.longitude]),
-        (err) => {
-          console.warn('Geolocation error, using IP-based fallback:', err.message);
-          // Don't set a hardcoded fallback — leave null so map shows a generic view
+      const watchId = navigator.geolocation.watchPosition(
+        (pos) => {
+          setUserPosition([pos.coords.latitude, pos.coords.longitude]);
         },
-        { enableHighAccuracy: true, timeout: 8000 }
+        (err) => {
+          console.warn('Geolocation error:', err.message);
+        },
+        { enableHighAccuracy: true, timeout: 10000, maximumAge: 0 }
       );
+      
+      fetchDashboardData();
+      return () => {
+        navigator.geolocation.clearWatch(watchId);
+        if (wsRef.current) wsRef.current.close();
+      };
+    } else {
+      fetchDashboardData();
+      return () => { if (wsRef.current) wsRef.current.close(); };
     }
-    fetchDashboardData();
-    return () => { if (wsRef.current) wsRef.current.close(); };
   }, []);
 
   // Fetch hexagons when position known
