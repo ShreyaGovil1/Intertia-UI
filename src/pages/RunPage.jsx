@@ -55,7 +55,7 @@ export default function RunPage() {
     startRun,
     addPoint,
     syncPoints,
-    claimHexes,
+    closeLoop,
     endRun,
     updateDuration,
     pause,
@@ -107,24 +107,24 @@ export default function RunPage() {
     };
   }, []);
 
-  // Load nearby hexagons
+  // Load nearby claims
   useEffect(() => {
-    const fetchHexagons = async () => {
+    const fetchClaims = async () => {
       if (!userPosition) return;
       try {
         const [lat, lon] = userPosition;
         const response = await fetch(
-          `${API_BASE}/hexagons?min_lat=${lat - 0.1}&max_lat=${lat + 0.1}&min_lon=${lon - 0.1}&max_lon=${lon + 0.1}`
+          `${API_BASE}/claims?min_lat=${lat - 0.1}&max_lat=${lat + 0.1}&min_lon=${lon - 0.1}&max_lon=${lon + 0.1}`
         );
         if (response.ok) {
           const data = await response.json();
-          setClaims(data); // keeping the state name `claims` to minimize changes, but they are hexagons
+          setClaims(data);
         }
       } catch (e) {
-        console.error('Error fetching hexagons:', e);
+        console.error('Error fetching claims:', e);
       }
     };
-    fetchHexagons();
+    fetchClaims();
   }, [userPosition]);
 
   const handleStartRun = async () => {
@@ -198,29 +198,29 @@ export default function RunPage() {
     }
   };
 
-  const handleClaimHexes = async () => {
+  const handleCloseLoop = async () => {
     // First sync all pending points
     await syncPoints(token);
 
-    const result = await claimHexes(token);
+    const result = await closeLoop(token);
     if (result) {
-      setLastClaimInfo({ count: result.claimed_count, area: result.total_area_m2 });
+      setLastClaimInfo({ count: 1, area: result.area_m2 }); // Legacy returns single claim
       setShowClaimAnimation(true);
-      toast.success(result.message);
+      toast.success('Territory claimed!');
       setTimeout(() => setShowClaimAnimation(false), 3000);
 
       // Refresh claims
       if (userPosition) {
         const [lat, lon] = userPosition;
         const response = await fetch(
-          `${API_BASE}/hexagons?min_lat=${lat - 0.05}&max_lat=${lat + 0.05}&min_lon=${lon - 0.05}&max_lon=${lon + 0.05}`
+          `${API_BASE}/claims?min_lat=${lat - 0.05}&max_lat=${lat + 0.05}&min_lon=${lon - 0.05}&max_lon=${lon + 0.05}`
         );
         if (response.ok) {
           setClaims(await response.json());
         }
       }
     } else {
-      toast.error('Not enough GPS data to claim territory. Keep running!');
+      toast.error('Could not close loop. Keep running to surround an area!');
     }
   };
 
@@ -242,8 +242,8 @@ export default function RunPage() {
     // Sync final points
     await syncPoints(token);
 
-    // Auto-claim hexes on run end
-    await claimHexes(token);
+    // Auto-claim loop on run end
+    await closeLoop(token);
 
     // End run
     const finalRun = await endRun(token);
@@ -297,14 +297,16 @@ export default function RunPage() {
         />
         <MapUpdater center={mapCenter} />
 
-        {/* Existing hexagons */}
-        {claims.map((hex) => {
-          const positions = hex.boundary ? hex.boundary.map(([lat, lon]) => [lat, lon]) : [];
+        {/* Existing claims */}
+        {claims.map((claim) => {
+          if (!claim.geometry || !claim.geometry.coordinates) return null;
+          // GeoJSON is [lon, lat], Leaflet wants [lat, lon]
+          const positions = claim.geometry.coordinates[0].map(([lon, lat]) => [lat, lon]);
           if (positions.length < 3) return null;
-          const isOwn = hex.owner_id === user?.user_id;
+          const isOwn = claim.owner_id === user?.user_id;
           return (
             <Polygon
-              key={hex.h3_index}
+              key={claim.claim_id}
               positions={positions}
               pathOptions={{
                 fillColor: isOwn ? '#CCF381' : '#7000FF',

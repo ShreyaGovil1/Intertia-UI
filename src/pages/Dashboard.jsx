@@ -78,7 +78,7 @@ export default function Dashboard() {
   const [leaderboard, setLeaderboard] = useState([]);
   const [currentSeason, setCurrentSeason] = useState(null);
   const [isLoading, setIsLoading] = useState(true);
-  const [hexagons, setHexagons] = useState([]);
+  const [claims, setClaims] = useState([]);
   const [userPosition, setUserPosition] = useState(null);
   const [highlightedHexes, setHighlightedHexes] = useState(new Set());
   const wsRef = useRef(null);
@@ -108,10 +108,10 @@ export default function Dashboard() {
     }
   }, []);
 
-  // Fetch hexagons when position known
+  // Fetch claims when position known
   useEffect(() => {
     if (!userPosition) return;
-    fetchHexagons();
+    fetchClaims();
     connectLiveWS();
   }, [userPosition]);
 
@@ -134,15 +134,15 @@ export default function Dashboard() {
     setIsLoading(false);
   };
 
-  const fetchHexagons = async () => {
+  const fetchClaims = async () => {
     if (!userPosition) return;
     try {
       const [lat, lon] = userPosition;
       const res = await fetch(
-        `${API_URL}/hexagons?min_lat=${lat - 0.1}&max_lat=${lat + 0.1}&min_lon=${lon - 0.1}&max_lon=${lon + 0.1}`
+        `${API_URL}/claims?min_lat=${lat - 0.1}&max_lat=${lat + 0.1}&min_lon=${lon - 0.1}&max_lon=${lon + 0.1}`
       );
-      if (res.ok) setHexagons(await res.json());
-    } catch (e) { console.error('Hex fetch error:', e); }
+      if (res.ok) setClaims(await res.json());
+    } catch (e) { console.error('Claims fetch error:', e); }
   };
 
   const connectLiveWS = () => {
@@ -245,28 +245,30 @@ export default function Dashboard() {
             <TileLayer url="https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png" />
             <CinematicEntry target={userPosition} />
 
-            {/* H3 Hexagon territories */}
-            {hexagons.map((hex) => {
-              const positions = hexBoundaryToPositions(hex.boundary || []);
+            {/* Free-form territories */}
+            {claims.map((claim) => {
+              if (!claim.geometry || !claim.geometry.coordinates) return null;
+              // GeoJSON coordinates are [lon, lat], Leaflet expects [lat, lon]
+              const positions = claim.geometry.coordinates[0].map(([lon, lat]) => [lat, lon]);
               if (positions.length < 3) return null;
-              const color = getColorForUser(hex.owner_name || '', user?.user_id, hex.owner_id);
-              const isHighlighted = highlightedHexes.has(hex.h3_index);
+              const color = getColorForUser(claim.owner_name || '', user?.user_id, claim.owner_id);
+              
               return (
                 <Polygon
-                  key={hex.h3_index}
+                  key={claim.claim_id}
                   positions={positions}
                   pathOptions={{
-                    fillColor: isHighlighted ? '#FFD700' : color,
-                    fillOpacity: isHighlighted ? 0.7 : 0.45,
-                    color: isHighlighted ? '#FFD700' : color,
-                    weight: isHighlighted ? 3 : 1.5,
-                    className: isHighlighted ? 'hex-flash' : 'hex-territory',
+                    fillColor: color,
+                    fillOpacity: 0.45,
+                    color: color,
+                    weight: 2,
+                    className: 'hex-territory',
                   }}
                 >
                   <Tooltip sticky className="hex-tooltip">
                     <div className="text-xs">
-                      <strong>{hex.owner_name}</strong>
-                      <br />{Math.round(hex.area_m2)} m²
+                      <strong>{claim.owner_name}</strong>
+                      <br />{Math.round(claim.area_m2)} m²
                     </div>
                   </Tooltip>
                 </Polygon>
