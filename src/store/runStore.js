@@ -1,12 +1,21 @@
 import { create } from 'zustand';
+import buffer from '@turf/buffer';
+import { lineString } from '@turf/helpers';
 import { API_BASE } from '@/env';
 
 const API_URL = API_BASE;
 
-// Strict GPS accuracy threshold in meters - points worse than this are discarded
+// ── GPS Quality Thresholds ──
+// Strict accuracy: discard hardware GPS readings worse than 15 m
 const MAX_ACCURACY_M = 15;
-// Minimum movement in meters to count a new point (filters GPS jitter when stationary)
+// Minimum movement to record a new point (filters stationary jitter)
 const MIN_MOVEMENT_M = 2;
+// Maximum plausible human speed (m/s). 12 m/s ≈ 43 km/h — elite sprinting.
+// Any implied velocity above this is a GPS teleportation artefact.
+const MAX_SPEED_MPS = 12;
+// Buffer radius (metres) applied to each side of the run's linear trajectory
+// to generate a claimable 2D polygon from a straight-line track.
+const PATH_BUFFER_RADIUS_M = 20;
 
 export const useRunStore = create((set, get) => ({
   currentRun: null,
@@ -16,11 +25,13 @@ export const useRunStore = create((set, get) => ({
   areaClaimed: 0,
   duration: 0,
   speed: 0,
-  startTime: null,     // Absolute timestamp when run started (for monotonic time)
-  pausedTime: 0,       // Accumulated paused seconds
+  startTime: null,      // Absolute timestamp when run started (monotonic base)
+  pausedTime: 0,        // Accumulated paused seconds
   pauseStartTime: null, // When the current pause began
+  droppedPoints: 0,     // Count of GPS points discarded by quality filters
   wsConnection: null,
 
+  // ── Start a new run ──
   startRun: async (token, runType = 'solo', groupId = null) => {
     try {
       const response = await fetch(`${API_URL}/runs/start`, {
@@ -47,6 +58,7 @@ export const useRunStore = create((set, get) => ({
         startTime: Date.now(),
         pausedTime: 0,
         pauseStartTime: null,
+        droppedPoints: 0,
       });
 
       return run;
@@ -56,41 +68,59 @@ export const useRunStore = create((set, get) => ({
     }
   },
 
+  // ── Ingest a GPS point with strict quality filtering ──
   addPoint: (point) => {
-    const { points, distance } = get();
+    const { points, distance, droppedPoints } = get();
 
-    // Strict accuracy filter: discard low-quality GPS readings
+    // Gate 1: Hardware accuracy — discard low-quality readings
     if (point.accuracy_m > MAX_ACCURACY_M) {
+      set({ droppedPoints: droppedPoints + 1 });
       return;
     }
-
-    let newDistance = distance;
 
     if (points.length > 0) {
       const lastPoint = points[points.length - 1];
       const segDist = haversineDistance(
-        lastPoint.lat,
-        lastPoint.lon,
-        point.lat,
-        point.lon
+        lastPoint.lat, lastPoint.lon,
+        point.lat, point.lon
       );
 
-      // Filter GPS jitter: ignore micro-movements when stationary
+      // Gate 2: Stationary jitter filter
       if (segDist < MIN_MOVEMENT_M) {
         return;
       }
 
-      newDistance += segDist;
-    }
+      // Gate 3: Velocity-based teleportation filter
+      const lastTs = new Date(lastPoint.timestamp).getTime();
+      const curTs = new Date(point.timestamp).getTime();
+      const deltaSeconds = (curTs - lastTs) / 1000;
 
-    set({
-      points: [...points, point],
-      distance: newDistance,
-      speed: point.speed_mps || 0,
-    });
+      if (deltaSeconds > 0) {
+        const impliedSpeed = segDist / deltaSeconds;
+        if (impliedSpeed > MAX_SPEED_MPS) {
+          // Impossible human velocity — GPS teleportation artefact
+          set({ droppedPoints: droppedPoints + 1 });
+          return;
+        }
+      }
+
+      set({
+        points: [...points, point],
+        distance: distance + segDist,
+        speed: point.speed_mps || 0,
+      });
+    } else {
+      // First point — always accept if it passed accuracy gate
+      set({
+        points: [point],
+        speed: point.speed_mps || 0,
+      });
+    }
   },
 
-  // Called every animation frame to compute monotonic elapsed time
+  // ── Monotonic elapsed time (background-safe) ──
+  // Called every requestAnimationFrame tick. Computes wall-clock elapsed minus
+  // paused durations so the timer snaps back instantly when the browser wakes.
   updateDuration: () => {
     const { startTime, pausedTime, pauseStartTime } = get();
     if (!startTime) return;
@@ -98,7 +128,7 @@ export const useRunStore = create((set, get) => ({
     const now = Date.now();
     let elapsed = Math.floor((now - startTime) / 1000);
 
-    // Subtract total paused time
+    // Subtract total accumulated paused time
     elapsed -= pausedTime;
 
     // If currently paused, also subtract the ongoing pause
@@ -124,11 +154,12 @@ export const useRunStore = create((set, get) => ({
     }
   },
 
+  // ── Sync points to backend ──
   syncPoints: async (token) => {
     const { currentRun, points } = get();
     if (!currentRun || points.length === 0) return;
 
-    // Get unsent points (last 10 or all if less)
+    // Send last 10 points
     const pointsToSync = points.slice(-10);
 
     try {
@@ -143,7 +174,6 @@ export const useRunStore = create((set, get) => ({
       });
 
       if (response.ok) {
-        // Server recalculates distance, we trust our local calculation
         await response.json();
       }
     } catch (e) {
@@ -151,6 +181,7 @@ export const useRunStore = create((set, get) => ({
     }
   },
 
+  // ── Claim H3 hexagons from the current run ──
   claimHexes: async (token) => {
     const { currentRun } = get();
     if (!currentRun) return null;
@@ -242,12 +273,51 @@ export const useRunStore = create((set, get) => ({
       startTime: null,
       pausedTime: 0,
       pauseStartTime: null,
+      droppedPoints: 0,
     }),
+
+  // ── Generate a buffered polygon from the run's linear path ──
+  // Uses Turf.js to convert a 1D GPS trace into a 2D claimable area.
+  // Handles self-intersections and sharp turns perfectly.
+  getBufferedPath: () => {
+    const { points } = get();
+    if (points.length < 2) return null;
+
+    try {
+      // Turf expects [longitude, latitude]
+      const ls = lineString(points.map((p) => [p.lon, p.lat]));
+      
+      // Buffer by PATH_BUFFER_RADIUS_M (converted to kilometers)
+      const buffered = buffer(ls, PATH_BUFFER_RADIUS_M / 1000, { units: 'kilometers' });
+      
+      if (!buffered || !buffered.geometry || !buffered.geometry.coordinates) return null;
+
+      // Extract the outer ring of the resulting polygon
+      const ring = buffered.geometry.type === 'Polygon' 
+        ? buffered.geometry.coordinates[0]
+        : buffered.geometry.type === 'MultiPolygon' 
+          ? buffered.geometry.coordinates[0][0]
+          : null;
+
+      if (!ring) return null;
+
+      // Convert back to Leaflet [latitude, longitude]
+      return ring.map(([lon, lat]) => [lat, lon]);
+    } catch (e) {
+      console.error("Turf buffer error:", e);
+      return null;
+    }
+  },
 }));
 
-// Helper function
-function haversineDistance(lat1, lon1, lat2, lon2) {
-  const R = 6371000; // Earth radius in meters
+
+// ══════════════════════════════════════════════════════════════════════════════
+// Pure helper functions (exported for potential testing)
+// ══════════════════════════════════════════════════════════════════════════════
+
+/** Haversine distance between two WGS-84 points (metres). */
+export function haversineDistance(lat1, lon1, lat2, lon2) {
+  const R = 6371000;
   const phi1 = (lat1 * Math.PI) / 180;
   const phi2 = (lat2 * Math.PI) / 180;
   const deltaPhi = ((lat2 - lat1) * Math.PI) / 180;
@@ -260,3 +330,5 @@ function haversineDistance(lat1, lon1, lat2, lon2) {
 
   return R * c;
 }
+
+

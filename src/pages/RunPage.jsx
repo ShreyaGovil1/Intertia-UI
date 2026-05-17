@@ -52,15 +52,18 @@ export default function RunPage() {
     areaClaimed,
     duration,
     speed,
+    droppedPoints,
     startRun,
     addPoint,
     syncPoints,
+    claimHexes,
     closeLoop,
     endRun,
     updateDuration,
     pause,
     resume,
     reset,
+    getBufferedPath,
   } = useRunStore();
 
   const [mapCenter, setMapCenter] = useState([51.505, -0.09]); // Default to London
@@ -75,7 +78,7 @@ export default function RunPage() {
   const timerRef = useRef(null);
   const syncIntervalRef = useRef(null);
 
-  // Get user's current location on mount
+  // ── Initial GPS lock on mount ──
   useEffect(() => {
     if (navigator.geolocation) {
       navigator.geolocation.getCurrentPosition(
@@ -88,7 +91,7 @@ export default function RunPage() {
           console.error('Geolocation error:', error);
           setGpsError('Unable to get your location. Please enable GPS.');
         },
-        { enableHighAccuracy: true, timeout: 10000 }
+        { enableHighAccuracy: true, timeout: 10000, maximumAge: 0 }
       );
     } else {
       setGpsError('Geolocation is not supported by your browser.');
@@ -107,7 +110,7 @@ export default function RunPage() {
     };
   }, []);
 
-  // Load nearby claims
+  // ── Load nearby claims ──
   useEffect(() => {
     const fetchClaims = async () => {
       if (!userPosition) return;
@@ -127,6 +130,7 @@ export default function RunPage() {
     fetchClaims();
   }, [userPosition]);
 
+  // ── Start run handler ──
   const handleStartRun = async () => {
     if (!userPosition) {
       toast.error('Waiting for GPS signal...');
@@ -141,12 +145,20 @@ export default function RunPage() {
 
     toast.success('Run started! Start moving to capture territory.');
 
-    // Start GPS tracking with high accuracy
+    // ── GPS tracking with strict hardware settings ──
+    // maximumAge: 0 prevents the browser from returning stale cached positions
+    // enableHighAccuracy: true forces the device to use its best sensor
     watchIdRef.current = navigator.geolocation.watchPosition(
       (position) => {
         if (isPaused) return;
 
         const { latitude, longitude, accuracy, speed: gpsSpeed, heading } = position.coords;
+
+        // Hardware accuracy gate: drop anything worse than 15m at ingestion
+        if (accuracy > 15) {
+          return;
+        }
+
         setUserPosition([latitude, longitude]);
         setMapCenter([latitude, longitude]);
 
@@ -159,7 +171,7 @@ export default function RunPage() {
           heading: heading || null,
         };
 
-        // addPoint already does strict accuracy filtering internally
+        // addPoint performs additional velocity-based filtering internally
         addPoint(point);
       },
       (error) => {
@@ -168,24 +180,28 @@ export default function RunPage() {
       },
       {
         enableHighAccuracy: true,
-        maximumAge: 2000,
+        maximumAge: 0,       // Never use cached positions
         timeout: 10000,
       }
     );
 
-    // Start monotonic duration timer using requestAnimationFrame
+    // ── Monotonic timer via requestAnimationFrame ──
+    // rAF automatically pauses when the tab is backgrounded. When the browser
+    // returns, updateDuration() recalculates from the absolute wall-clock
+    // startTime, instantly snapping back to the correct elapsed value.
     const tick = () => {
       updateDuration();
       timerRef.current = requestAnimationFrame(tick);
     };
     timerRef.current = requestAnimationFrame(tick);
 
-    // Start sync interval (every 5 seconds)
+    // ── Background point sync every 5s ──
     syncIntervalRef.current = setInterval(() => {
       syncPoints(token);
     }, 5000);
   };
 
+  // ── Pause / Resume ──
   const handlePause = () => {
     if (!isPaused) {
       pause();
@@ -198,18 +214,18 @@ export default function RunPage() {
     }
   };
 
-  const handleCloseLoop = async () => {
-    // First sync all pending points
+  // ── Claim hexagonal territory ──
+  const handleClaimHexes = async () => {
     await syncPoints(token);
 
-    const result = await closeLoop(token);
+    const result = await claimHexes(token);
     if (result) {
-      setLastClaimInfo({ count: 1, area: result.area_m2 }); // Legacy returns single claim
+      setLastClaimInfo({ count: result.claimed_count || 1, area: result.total_area_m2 });
       setShowClaimAnimation(true);
-      toast.success('Territory claimed!');
+      toast.success(`Claimed ${result.claimed_count} hexes!`);
       setTimeout(() => setShowClaimAnimation(false), 3000);
 
-      // Refresh claims
+      // Refresh claims on map
       if (userPosition) {
         const [lat, lon] = userPosition;
         const response = await fetch(
@@ -220,12 +236,13 @@ export default function RunPage() {
         }
       }
     } else {
-      toast.error('Could not close loop. Keep running to surround an area!');
+      toast.error('Not enough GPS data to claim territory yet. Keep running!');
     }
   };
 
+  // ── End run ──
   const handleEndRun = async () => {
-    // Clear intervals
+    // Clear all intervals and watchers
     if (watchIdRef.current) {
       navigator.geolocation.clearWatch(watchIdRef.current);
       watchIdRef.current = null;
@@ -242,8 +259,8 @@ export default function RunPage() {
     // Sync final points
     await syncPoints(token);
 
-    // Auto-claim loop on run end
-    await closeLoop(token);
+    // Auto-claim territory on run end
+    await claimHexes(token);
 
     // End run
     const finalRun = await endRun(token);
@@ -255,6 +272,7 @@ export default function RunPage() {
     }
   };
 
+  // ── Formatting helpers ──
   const formatDuration = (seconds) => {
     const hrs = Math.floor(seconds / 3600);
     const mins = Math.floor((seconds % 3600) / 60);
@@ -272,14 +290,15 @@ export default function RunPage() {
 
   const formatPace = (speedMps) => {
     if (!speedMps || speedMps === 0) return '--:--';
-    const paceMinPerKm = 16.6667 / speedMps; // Convert m/s to min/km
+    const paceMinPerKm = 16.6667 / speedMps;
     const mins = Math.floor(paceMinPerKm);
     const secs = Math.round((paceMinPerKm - mins) * 60);
     return `${mins}:${secs.toString().padStart(2, '0')}`;
   };
 
-  // Convert points to polyline positions
+  // ── Derived data ──
   const trailPositions = points.map((p) => [p.lat, p.lon]);
+  const bufferedPath = getBufferedPath();
 
   return (
     <div className="h-screen w-screen relative bg-[#09090B] overflow-hidden">
@@ -290,6 +309,7 @@ export default function RunPage() {
         className="h-full w-full z-0"
         zoomControl={false}
         attributionControl={false}
+        preferCanvas={true}
       >
         <TileLayer
           url="https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png"
@@ -317,6 +337,20 @@ export default function RunPage() {
             />
           );
         })}
+
+        {/* Buffered territory preview (20m radius around trail) */}
+        {bufferedPath && (
+          <Polygon
+            positions={bufferedPath}
+            pathOptions={{
+              fillColor: '#CCF381',
+              fillOpacity: 0.12,
+              color: '#CCF381',
+              weight: 1,
+              dashArray: '4, 6',
+            }}
+          />
+        )}
 
         {/* Current run trail */}
         {trailPositions.length > 1 && (
@@ -367,11 +401,16 @@ export default function RunPage() {
         {/* GPS Status */}
         <div className="glass rounded-full px-4 py-2 flex items-center gap-2">
           <Navigation
-            className={`w-4 h-4 ${userPosition ? 'text-[#CCF381]' : 'text-yellow-500'}`}
+            className={`w-4 h-4 ${userPosition ? 'text-[#CCF381]' : 'text-yellow-500 animate-pulse'}`}
           />
           <span className="text-sm text-white">
             {userPosition ? 'GPS Active' : 'Searching...'}
           </span>
+          {isRunning && droppedPoints > 0 && (
+            <span className="text-xs text-zinc-500 ml-1">
+              ({droppedPoints} filtered)
+            </span>
+          )}
         </div>
       </div>
 
