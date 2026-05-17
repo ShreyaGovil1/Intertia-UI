@@ -39,34 +39,16 @@ function getColorForUser(name, currentUserId, ownerId) {
   return `hsl(${hue}, 65%, 55%)`;
 }
 
-// ═══════════════════════════════════════════════════════════
-// King of the Hill: Deduplicate overlapping claims.
-// When multiple users claim the same area, only the current
-// record-holder ("The King") is rendered.
-// Uses most-recent-run as the dominance metric.
-// ═══════════════════════════════════════════════════════════
+// H3 hexes are non-overlapping by definition — each h3_index is globally unique
+// and owned by exactly one user. Simple dedup by claim_id (= h3_index).
 function deduplicateClaims(claims) {
-  // Group claims by a spatial key (rounded center coords)
-  const buckets = new Map();
-
+  const seen = new Map();
   for (const claim of claims) {
-    // Spatial bucket key: rounded to ~10m grid for overlap detection
-    const key = `${(claim.center_lat * 1000).toFixed(0)}_${(claim.center_lon * 1000).toFixed(0)}`;
-
-    const existing = buckets.get(key);
-    if (!existing) {
-      buckets.set(key, claim);
-    } else {
-      // Dominance: most recently maintained claim wins
-      const existingTime = new Date(existing.last_maintained_at || existing.created_at).getTime();
-      const newTime = new Date(claim.last_maintained_at || claim.created_at).getTime();
-      if (newTime > existingTime) {
-        buckets.set(key, claim);
-      }
+    if (!seen.has(claim.claim_id)) {
+      seen.set(claim.claim_id, claim);
     }
   }
-
-  return Array.from(buckets.values());
+  return Array.from(seen.values());
 }
 
 // ═══════════════════════════════════════════════════════════
