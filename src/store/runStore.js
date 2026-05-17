@@ -15,7 +15,7 @@ const MIN_MOVEMENT_M = 2;
 const MAX_SPEED_MPS = 12;
 // Buffer radius (metres) applied to each side of the run's linear trajectory
 // to generate a claimable 2D polygon from a straight-line track.
-const PATH_BUFFER_RADIUS_M = 20;
+const PATH_BUFFER_RADIUS_M = 10;
 
 export const useRunStore = create((set, get) => ({
   currentRun: null,
@@ -29,6 +29,7 @@ export const useRunStore = create((set, get) => ({
   pausedTime: 0,        // Accumulated paused seconds
   pauseStartTime: null, // When the current pause began
   droppedPoints: 0,     // Count of GPS points discarded by quality filters
+  syncedUpTo: 0,        // Index into points[] of last successfully synced point
   wsConnection: null,
 
   // ── Start a new run ──
@@ -59,6 +60,7 @@ export const useRunStore = create((set, get) => ({
         pausedTime: 0,
         pauseStartTime: null,
         droppedPoints: 0,
+        syncedUpTo: 0,
       });
 
       return run;
@@ -124,18 +126,9 @@ export const useRunStore = create((set, get) => ({
   updateDuration: () => {
     const { startTime, pausedTime, pauseStartTime } = get();
     if (!startTime) return;
+    if (pauseStartTime) return; // frozen while paused — avoids floor-boundary oscillation
 
-    const now = Date.now();
-    let elapsed = Math.floor((now - startTime) / 1000);
-
-    // Subtract total accumulated paused time
-    elapsed -= pausedTime;
-
-    // If currently paused, also subtract the ongoing pause
-    if (pauseStartTime) {
-      elapsed -= Math.floor((now - pauseStartTime) / 1000);
-    }
-
+    const elapsed = Math.floor((Date.now() - startTime) / 1000) - pausedTime;
     set({ duration: Math.max(0, elapsed) });
   },
 
@@ -156,11 +149,12 @@ export const useRunStore = create((set, get) => ({
 
   // ── Sync points to backend ──
   syncPoints: async (token) => {
-    const { currentRun, points } = get();
-    if (!currentRun || points.length === 0) return;
+    const { currentRun, points, syncedUpTo } = get();
+    if (!currentRun || points.length <= syncedUpTo) return;
 
-    // Send last 10 points
-    const pointsToSync = points.slice(-10);
+    // Only send points we haven't synced yet
+    const pointsToSync = points.slice(syncedUpTo);
+    const newSyncedUpTo = points.length;
 
     try {
       const response = await fetch(`${API_URL}/runs/${currentRun.run_id}/points`, {
@@ -174,7 +168,7 @@ export const useRunStore = create((set, get) => ({
       });
 
       if (response.ok) {
-        await response.json();
+        set({ syncedUpTo: newSyncedUpTo });
       }
     } catch (e) {
       console.error('Sync points error:', e);
@@ -195,9 +189,11 @@ export const useRunStore = create((set, get) => ({
 
       if (response.ok) {
         const result = await response.json();
-        set((state) => ({
-          areaClaimed: state.areaClaimed + result.total_area_m2,
-        }));
+        if (result.claimed_count > 0 && result.total_area_m2 > 0) {
+          set((state) => ({
+            areaClaimed: state.areaClaimed + result.total_area_m2,
+          }));
+        }
         return result;
       }
     } catch (e) {
@@ -274,6 +270,7 @@ export const useRunStore = create((set, get) => ({
       pausedTime: 0,
       pauseStartTime: null,
       droppedPoints: 0,
+      syncedUpTo: 0,
     }),
 
   // ── Generate a buffered polygon from the run's linear path ──

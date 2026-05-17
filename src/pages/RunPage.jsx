@@ -31,6 +31,19 @@ L.Icon.Default.mergeOptions({
   shadowUrl: 'https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.7.1/images/marker-shadow.png',
 });
 
+// h3 boundary is [[lat,lon],...]; normalize to claim-like shape with GeoJSON [[lon,lat],...]
+const normalizeHexes = (hexes) =>
+  hexes.map((hex) => ({
+    claim_id: hex.h3_index,
+    owner_id: hex.owner_id,
+    owner_name: hex.owner_name,
+    area_m2: hex.area_m2,
+    geometry: {
+      type: 'Polygon',
+      coordinates: [hex.boundary.map(([hlat, hlon]) => [hlon, hlat])],
+    },
+  }));
+
 const MapUpdater = ({ center, zoom }) => {
   const map = useMap();
   useEffect(() => {
@@ -77,6 +90,7 @@ export default function RunPage() {
   const watchIdRef = useRef(null);
   const timerRef = useRef(null);
   const syncIntervalRef = useRef(null);
+  const isPausedRef = useRef(false);
 
   // ── Initial GPS lock on mount ──
   useEffect(() => {
@@ -110,21 +124,21 @@ export default function RunPage() {
     };
   }, []);
 
-  // ── Load nearby claims ──
+  // ── Load nearby hexes ──
   useEffect(() => {
     const fetchClaims = async () => {
       if (!userPosition) return;
       try {
         const [lat, lon] = userPosition;
         const response = await fetch(
-          `${API_BASE}/claims?min_lat=${lat - 0.1}&max_lat=${lat + 0.1}&min_lon=${lon - 0.1}&max_lon=${lon + 0.1}`
+          `${API_BASE}/hexagons?min_lat=${lat - 0.1}&max_lat=${lat + 0.1}&min_lon=${lon - 0.1}&max_lon=${lon + 0.1}`
         );
         if (response.ok) {
-          const data = await response.json();
-          setClaims(data);
+          const hexes = await response.json();
+          setClaims(normalizeHexes(hexes));
         }
       } catch (e) {
-        console.error('Error fetching claims:', e);
+        console.error('Error fetching hexes:', e);
       }
     };
     fetchClaims();
@@ -150,12 +164,12 @@ export default function RunPage() {
     // enableHighAccuracy: true forces the device to use its best sensor
     watchIdRef.current = navigator.geolocation.watchPosition(
       (position) => {
-        if (isPaused) return;
+        if (isPausedRef.current) return;
 
         const { latitude, longitude, accuracy, speed: gpsSpeed, heading } = position.coords;
 
-        // Hardware accuracy gate: drop anything worse than 15m at ingestion
-        if (accuracy > 15) {
+        // Hardware accuracy gate: relaxed to 25m to reduce dropped readings on walks
+        if (accuracy > 25) {
           return;
         }
 
@@ -206,10 +220,12 @@ export default function RunPage() {
     if (!isPaused) {
       pause();
       setIsPaused(true);
+      isPausedRef.current = true;
       toast.info('Run paused');
     } else {
       resume();
       setIsPaused(false);
+      isPausedRef.current = false;
       toast.info('Run resumed');
     }
   };
@@ -225,14 +241,14 @@ export default function RunPage() {
       toast.success(`Claimed ${result.claimed_count} hexes!`);
       setTimeout(() => setShowClaimAnimation(false), 3000);
 
-      // Refresh claims on map
+      // Refresh hexes on map
       if (userPosition) {
         const [lat, lon] = userPosition;
         const response = await fetch(
-          `${API_BASE}/claims?min_lat=${lat - 0.05}&max_lat=${lat + 0.05}&min_lon=${lon - 0.05}&max_lon=${lon + 0.05}`
+          `${API_BASE}/hexagons?min_lat=${lat - 0.05}&max_lat=${lat + 0.05}&min_lon=${lon - 0.05}&max_lon=${lon + 0.05}`
         );
         if (response.ok) {
-          setClaims(await response.json());
+          setClaims(normalizeHexes(await response.json()));
         }
       }
     } else {

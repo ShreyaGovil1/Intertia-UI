@@ -254,9 +254,27 @@ export default function Dashboard() {
     try {
       const [lat, lon] = userPosition;
       const res = await fetch(
-        `${API_URL}/claims?min_lat=${lat - 0.1}&max_lat=${lat + 0.1}&min_lon=${lon - 0.1}&max_lon=${lon + 0.1}`
+        `${API_URL}/hexagons?min_lat=${lat - 0.1}&max_lat=${lat + 0.1}&min_lon=${lon - 0.1}&max_lon=${lon + 0.1}`
       );
-      if (res.ok) setClaims(await res.json());
+      if (res.ok) {
+        const hexes = await res.json();
+        // Normalize H3 hex format → claim-like shape TerritoryPolygon expects
+        // h3 boundary is [[lat,lon],...]; GeoJSON wants [[lon,lat],...]
+        setClaims(hexes.map(hex => ({
+          claim_id: hex.h3_index,
+          owner_id: hex.owner_id,
+          owner_name: hex.owner_name,
+          area_m2: hex.area_m2,
+          center_lat: hex.center_lat,
+          center_lon: hex.center_lon,
+          last_maintained_at: hex.last_maintained_at,
+          created_at: hex.claimed_at,
+          geometry: {
+            type: 'Polygon',
+            coordinates: [hex.boundary.map(([hlat, hlon]) => [hlon, hlat])],
+          },
+        })));
+      }
     } catch (e) { console.error('Claims fetch error:', e); }
   };
 

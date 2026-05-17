@@ -62,11 +62,11 @@ export default function Profile() {
     try {
       const headers = token ? { Authorization: `Bearer ${token}` } : {};
 
-      const [profileRes, statsRes, badgesRes, claimsRes] = await Promise.all([
+      const [profileRes, statsRes, badgesRes, hexesRes] = await Promise.all([
         fetch(`${API_URL}/users/${targetUserId}`, { headers, credentials: 'include' }),
         fetch(`${API_URL}/users/${targetUserId}/stats`, { headers, credentials: 'include' }),
         fetch(`${API_URL}/badges/user/${targetUserId}`, { headers, credentials: 'include' }),
-        fetch(`${API_URL}/claims/user/${targetUserId}`, { headers, credentials: 'include' }),
+        fetch(`${API_URL}/hexagons/user/${targetUserId}`, { headers, credentials: 'include' }),
       ]);
 
       if (profileRes.ok) setProfile(await profileRes.json());
@@ -76,7 +76,16 @@ export default function Profile() {
         setRuns(statsData.recent_runs || []);
       }
       if (badgesRes.ok) setBadges(await badgesRes.json());
-      if (claimsRes.ok) setClaims(await claimsRes.json());
+      if (hexesRes.ok) {
+        // Normalize hex format to what the claims tab renders
+        const hexes = await hexesRes.json();
+        setClaims(hexes.map((hex) => ({
+          claim_id: hex.h3_index,
+          area_m2: hex.area_m2,
+          created_at: hex.claimed_at,
+          decay_percent: hex.decay_percent ?? 0,
+        })));
+      }
     } catch (e) {
       console.error('Profile fetch error:', e);
     }

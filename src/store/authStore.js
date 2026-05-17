@@ -48,7 +48,7 @@ export const useAuthStore = create(
         } catch (e) {
           console.error('Auth check error:', e);
         }
-        set({ user: null, isAuthenticated: false, isLoading: false });
+        set({ user: null, token: null, isAuthenticated: false, isLoading: false });
         return false;
       },
 
